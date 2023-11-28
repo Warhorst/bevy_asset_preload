@@ -12,6 +12,12 @@ pub struct AssetPreloadPlugin<LoadingState: States, NextState: States> {
     next_state: NextState
 }
 
+impl<LoadingState: States, NextState: States> AssetPreloadPlugin<LoadingState, NextState> {
+    pub fn new(loading_state: LoadingState, next_state: NextState) -> Self {
+        Self { loading_state, next_state }
+    }
+}
+
 /// Resource that holds handles to all assets in the assets folder. This only exists to ensure
 /// the assets don't get unloaded because nobody is using them.
 #[derive(Resource)]
