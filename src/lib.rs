@@ -1,5 +1,5 @@
 use bevy_app::prelude::*;
-use bevy_asset::{LoadedFolder, RecursiveDependencyLoadState};
+use bevy_asset::{LoadedFolder, LoadState, RecursiveDependencyLoadState};
 use bevy_asset::prelude::*;
 use bevy_ecs::prelude::*;
 
@@ -54,6 +54,7 @@ impl<LoadingState: States, NextState: States> Plugin for AssetPreloadPlugin<Load
 }
 
 /// Start loading the assets folder, and store the folder handle in a resource.
+#[cfg(not(target_arch = "wasm32"))]
 fn start_asset_loading(
     mut commands: Commands,
     asset_server: Res<AssetServer>
@@ -64,6 +65,7 @@ fn start_asset_loading(
 
 /// Create a system that will check if the assets folder was loaded. If true, the system will switch to the
 /// provided state and deletes the folder handle. Every handle from the folder will be preserved in a LoadedAssets resource.
+#[cfg(not(target_arch = "wasm32"))]
 fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Commands, Res<AssetServer>, Res<LoadingAssetFolder>, Res<Assets<LoadedFolder>>, ResMut<NextState<S>>) {
     move |mut commands, asset_server, loading_asset_folder, loaded_folders, mut next_state| {
         if !loading_asset_folder.is_loaded(&asset_server) {
@@ -83,5 +85,31 @@ fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Command
         commands.remove_resource::<LoadingAssetFolder>();
 
         next_state.set(followup_state.clone())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn start_asset_loading(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>
+) {
+    let loaded_assets = LoadedAssets(wasm_load::wasm_load!());
+    commands.insert_resource(loaded_assets);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Commands, Res<AssetServer>, Res<LoadedAssets>, ResMut<NextState<S>>) {
+    move |mut commands, asset_server, loaded_assets, mut next_state| {
+        let all_loaded = loaded_assets.0
+            .iter()
+            .all(|uh| match asset_server.load_state(uh.id()) {
+                LoadState::Loaded => true,
+                LoadState::Failed => panic!("load failed!"),
+                _ => false
+            });
+
+        if all_loaded {
+            next_state.set(followup_state.clone())
+        }
     }
 }
