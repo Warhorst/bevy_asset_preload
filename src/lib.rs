@@ -1,7 +1,14 @@
+use std::fs::read_dir;
+use std::io;
+use std::path::Path;
+
 use bevy_app::prelude::*;
-use bevy_asset::{LoadedFolder, LoadState, RecursiveDependencyLoadState};
+use bevy_asset::LoadState;
 use bevy_asset::prelude::*;
 use bevy_ecs::prelude::*;
+use PathSource::*;
+
+pub use load_assets::load_assets;
 
 /// Plugin that starts loading all assets in the asset folder for a given state and
 /// automatically switches to another given state when everything is loaded.
@@ -9,31 +16,29 @@ pub struct AssetPreloadPlugin<LoadingState: States, NextState: States> {
     /// The state the plugin will start and keep loading all assets.
     loading_state: LoadingState,
     /// The state the plugin will switch to when all assets are loaded
-    next_state: NextState
+    next_state: NextState,
+    /// The path from where the paths to load the assets from originate
+    path_source: PathSource,
 }
 
 impl<LoadingState: States, NextState: States> AssetPreloadPlugin<LoadingState, NextState> {
-    pub fn new(loading_state: LoadingState, next_state: NextState) -> Self {
-        Self { loading_state, next_state }
+    /// Load all assets directly from the assets folder. This requires access to the file system and will therefore
+    /// not work in WASM.
+    pub fn load_from_asset_folder(loading_state: LoadingState, next_state: NextState) -> Self {
+        Self {
+            loading_state,
+            next_state,
+            path_source: LoadFromFolder,
+        }
     }
-}
 
-/// Resource that holds handles to all assets in the assets folder. This only exists to ensure
-/// the assets don't get unloaded because nobody is using them.
-#[derive(Resource)]
-struct LoadedAssets(Vec<UntypedHandle>);
-
-/// Resource that holds the handle to the currently loading asset folder.
-#[derive(Resource)]
-struct LoadingAssetFolder(Handle<LoadedFolder>);
-
-impl LoadingAssetFolder {
-    /// Tells if the asset folder is loaded. Might panic if the load failed.
-    fn is_loaded(&self, asset_server: &AssetServer) -> bool {
-        match asset_server.recursive_dependency_load_state(&self.0) {
-            RecursiveDependencyLoadState::Failed => panic!("some assets failed loading, abort"),
-            RecursiveDependencyLoadState::Loaded => true,
-            _ => false
+    /// Load all the given assets only. This variant can be used to preload the whole asset folder in a WASM environment. Use the
+    /// load_assets macro to provide a vector of all asset paths which is created at compile time.
+    pub fn load_given_paths<S: ToString>(loading_state: LoadingState, next_state: NextState, paths: impl IntoIterator<Item=S>) -> Self {
+        Self {
+            loading_state,
+            next_state,
+            path_source: GivenPaths(paths.into_iter().map(|s| s.to_string()).collect()),
         }
     }
 }
@@ -43,63 +48,81 @@ impl<LoadingState: States, NextState: States> Plugin for AssetPreloadPlugin<Load
         app
             .add_systems(
                 OnEnter(self.loading_state.clone()),
-                start_asset_loading
+                start_asset_loading(self.path_source.clone()),
             )
             .add_systems(
                 Update,
-                switch_state_when_all_loaded(self.next_state.clone()).run_if(in_state(self.loading_state.clone()))
+                switch_state_when_all_loaded(self.next_state.clone()).run_if(in_state(self.loading_state.clone())),
             )
         ;
     }
 }
 
-/// Start loading the assets folder, and store the folder handle in a resource.
-#[cfg(not(target_arch = "wasm32"))]
-fn start_asset_loading(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>
-) {
-    let folder_handle = asset_server.load_folder("./");
-    commands.insert_resource(LoadingAssetFolder(folder_handle));
+#[derive(Clone)]
+enum PathSource {
+    /// Load all asset paths from the asset folder.
+    LoadFromFolder,
+    /// Use a given list of paths to load the assets
+    GivenPaths(Vec<String>),
 }
 
-/// Create a system that will check if the assets folder was loaded. If true, the system will switch to the
-/// provided state and deletes the folder handle. Every handle from the folder will be preserved in a LoadedAssets resource.
-#[cfg(not(target_arch = "wasm32"))]
-fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Commands, Res<AssetServer>, Res<LoadingAssetFolder>, Res<Assets<LoadedFolder>>, ResMut<NextState<S>>) {
-    move |mut commands, asset_server, loading_asset_folder, loaded_folders, mut next_state| {
-        if !loading_asset_folder.is_loaded(&asset_server) {
-            return
+impl PathSource {
+    fn load_assets(&self, asset_server: &AssetServer) -> Vec<UntypedHandle> {
+        match self {
+            LoadFromFolder => {
+                let paths = load_asset_paths();
+                paths.into_iter().map(|p| asset_server.load_untyped(p).untyped()).collect()
+            }
+            GivenPaths(paths) => {
+                paths.iter().map(|p| asset_server.load_untyped(p).untyped()).collect()
+            }
         }
-
-        let folder = loaded_folders.get(loading_asset_folder.0.id()).expect("the folder should be loaded");
-
-        let loaded_assets = LoadedAssets(
-            folder.handles
-                .iter()
-                .map(Clone::clone)
-                .collect()
-        );
-
-        commands.insert_resource(loaded_assets);
-        commands.remove_resource::<LoadingAssetFolder>();
-
-        next_state.set(followup_state.clone())
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn start_asset_loading(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>
-) {
-    let loaded_assets = LoadedAssets(wasm_load::wasm_load!());
-    commands.insert_resource(loaded_assets);
+/// Resource that holds handles to all assets in the assets folder. This only exists to ensure
+/// the assets don't get unloaded because nobody is using them.
+#[derive(Resource)]
+struct LoadedAssets(Vec<UntypedHandle>);
+
+fn start_asset_loading(path_source: PathSource) -> impl Fn(Commands, Res<AssetServer>) {
+    move |mut commands: Commands, asset_server: Res<AssetServer>| {
+        let handles = path_source.load_assets(&asset_server);
+        commands.insert_resource(LoadedAssets(handles));
+    }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Commands, Res<AssetServer>, Res<LoadedAssets>, ResMut<NextState<S>>) {
-    move |mut commands, asset_server, loaded_assets, mut next_state| {
+// TODO copied code, fix!
+fn load_asset_paths() -> Vec<String> {
+    load_asset_paths_recursive(Path::new("./assets")).expect("the assets folder should exist")
+}
+
+fn load_asset_paths_recursive(path: &Path) -> io::Result<Vec<String>> {
+    let mut files = vec![];
+
+    if path.is_dir() {
+        for entry in read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(load_asset_paths_recursive(&path)?.into_iter());
+            } else {
+                let path_str = path
+                    .to_str()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .replace("./assets/", "")
+                    .to_string();
+                files.push(path_str);
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Res<AssetServer>, Res<LoadedAssets>, ResMut<NextState<S>>) {
+    move |asset_server, loaded_assets, mut next_state| {
         let all_loaded = loaded_assets.0
             .iter()
             .all(|uh| match asset_server.load_state(uh.id()) {
