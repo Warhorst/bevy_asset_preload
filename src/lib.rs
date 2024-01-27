@@ -46,6 +46,7 @@ impl<LoadingState: States, NextState: States> AssetPreloadPlugin<LoadingState, N
 impl<LoadingState: States, NextState: States> Plugin for AssetPreloadPlugin<LoadingState, NextState> {
     fn build(&self, app: &mut App) {
         app
+            .add_event::<AssetPreloadUpdate>()
             .add_systems(
                 OnEnter(self.loading_state.clone()),
                 start_asset_loading(self.path_source.clone()),
@@ -56,6 +57,14 @@ impl<LoadingState: States, NextState: States> Plugin for AssetPreloadPlugin<Load
             )
         ;
     }
+}
+
+#[derive(Event)]
+pub struct AssetPreloadUpdate {
+    /// The amount of assets which are already loaded
+    pub num_loaded: usize,
+    /// The amount of all assets which get currently loaded or are already loaded
+    pub num_loading: usize
 }
 
 #[derive(Clone)]
@@ -84,6 +93,16 @@ impl PathSource {
 /// the assets don't get unloaded because nobody is using them.
 #[derive(Resource)]
 struct LoadedAssets(Vec<UntypedHandle>);
+
+impl LoadedAssets {
+    fn iter(&self) -> impl Iterator<Item=&UntypedHandle> {
+        self.0.iter()
+    }
+
+    fn num_loading_assets(&self) -> usize {
+        self.0.len()
+    }
+}
 
 fn start_asset_loading(path_source: PathSource) -> impl Fn(Commands, Res<AssetServer>) {
     move |mut commands: Commands, asset_server: Res<AssetServer>| {
@@ -121,17 +140,23 @@ fn load_asset_paths_recursive(path: &Path) -> io::Result<Vec<String>> {
     Ok(files)
 }
 
-fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Res<AssetServer>, Res<LoadedAssets>, ResMut<NextState<S>>) {
-    move |asset_server, loaded_assets, mut next_state| {
-        let all_loaded = loaded_assets.0
+fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Res<AssetServer>, Res<LoadedAssets>, EventWriter<AssetPreloadUpdate>, ResMut<NextState<S>>) {
+    move |asset_server, loaded_assets, mut event_writer, mut next_state| {
+        let num_loaded = loaded_assets
             .iter()
-            .all(|uh| match asset_server.load_state(uh.id()) {
+            .filter(|uh|match asset_server.load_state(uh.id()) {
                 LoadState::Loaded => true,
                 LoadState::Failed => panic!("load failed!"),
                 _ => false
-            });
+            })
+            .count();
 
-        if all_loaded {
+        event_writer.send(AssetPreloadUpdate {
+            num_loaded,
+            num_loading: loaded_assets.num_loading_assets(),
+        });
+
+        if num_loaded == loaded_assets.num_loading_assets() {
             next_state.set(followup_state.clone())
         }
     }
