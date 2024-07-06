@@ -6,13 +6,15 @@ use bevy_app::prelude::*;
 use bevy_asset::LoadState;
 use bevy_asset::prelude::*;
 use bevy_ecs::prelude::*;
+use bevy_state::prelude::*;
+use bevy_state::state::FreelyMutableState;
 use PathSource::*;
 
 pub use load_assets::load_assets;
 
 /// Plugin that starts loading all assets in the asset folder for a given state and
 /// automatically switches to another given state when everything is loaded.
-pub struct AssetPreloadPlugin<LoadingState: States, NextState: States> {
+pub struct AssetPreloadPlugin<LoadingState: States + FreelyMutableState, NextState: States + FreelyMutableState> {
     /// The state the plugin will start and keep loading all assets.
     loading_state: LoadingState,
     /// The state the plugin will switch to when all assets are loaded
@@ -21,7 +23,7 @@ pub struct AssetPreloadPlugin<LoadingState: States, NextState: States> {
     path_source: PathSource,
 }
 
-impl<LoadingState: States, NextState: States> AssetPreloadPlugin<LoadingState, NextState> {
+impl<LoadingState: States + FreelyMutableState, NextState: States + FreelyMutableState> AssetPreloadPlugin<LoadingState, NextState> {
     /// Load all assets directly from the assets folder. This requires access to the file system and will therefore
     /// not work in WASM.
     pub fn load_from_asset_folder(loading_state: LoadingState, next_state: NextState) -> Self {
@@ -43,7 +45,7 @@ impl<LoadingState: States, NextState: States> AssetPreloadPlugin<LoadingState, N
     }
 }
 
-impl<LoadingState: States, NextState: States> Plugin for AssetPreloadPlugin<LoadingState, NextState> {
+impl<LoadingState: States + FreelyMutableState, NextState: States + FreelyMutableState> Plugin for AssetPreloadPlugin<LoadingState, NextState> {
     fn build(&self, app: &mut App) {
         app
             .add_event::<AssetPreloadUpdate>()
@@ -140,13 +142,13 @@ fn load_asset_paths_recursive(path: &Path) -> io::Result<Vec<String>> {
     Ok(files)
 }
 
-fn switch_state_when_all_loaded<S: States>(followup_state: S) -> impl Fn(Res<AssetServer>, Res<LoadedAssets>, EventWriter<AssetPreloadUpdate>, ResMut<NextState<S>>) {
+fn switch_state_when_all_loaded<S: States + FreelyMutableState>(followup_state: S) -> impl Fn(Res<AssetServer>, Res<LoadedAssets>, EventWriter<AssetPreloadUpdate>, ResMut<NextState<S>>) {
     move |asset_server, loaded_assets, mut event_writer, mut next_state| {
         let num_loaded = loaded_assets
             .iter()
             .filter(|uh|match asset_server.load_state(uh.id()) {
                 LoadState::Loaded => true,
-                LoadState::Failed => panic!("load failed!"),
+                LoadState::Failed(_) => panic!("load failed!"),
                 _ => false
             })
             .count();
