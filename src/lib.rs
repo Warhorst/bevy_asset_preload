@@ -153,7 +153,7 @@ fn switch_state_when_all_loaded<S: States + FreelyMutableState>(followup_state: 
             })
             .count();
 
-        event_writer.send(AssetPreloadUpdate {
+        event_writer.write(AssetPreloadUpdate {
             num_loaded,
             num_loading: loaded_assets.num_loading_assets(),
         });
